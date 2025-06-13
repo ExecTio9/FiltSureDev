@@ -1,0 +1,10 @@
+# KiCad junk files to ignore
+*.bak
+*.tmp
+*.~*
+*.kicad_prl
+autosave-*
+
+# OS files
+.DS_Store
+Thumbs.db
