@@ -1,0 +1,45 @@
+# Global OS junk files
+.DS_Store
+Thumbs.db
+
+# KiCad
+*.bak
+*.tmp
+*.~*
+*.kicad_prl
+autosave-*
+*.backup
+
+# Arduino IDE
+*.elf
+*.hex
+*.bin
+*.eep
+*.map
+*.d
+*.o
+*.a
+*.pyc
+
+# PlatformIO
+.pio/
+.vscode/
+*.pyc
+__pycache__/
+
+# Logs and build artifacts
+*.log
+*.swp
+*.swo
+
+# Misc
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# VS Code settings (optional - if you want to commit these, remove this)
+.vscode/
+
+# Ignore build artifacts for OTA tools if added
+ota_tools/build/
