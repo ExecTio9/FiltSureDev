@@ -21,7 +21,7 @@ This folder contains the hardware design files for the FiltSure HVAC Monitor sys
 
 ## Notes
 
-- All files are created using **KiCad** (version X.Y.Z recommended — specify your KiCad version here)
+- All files are created using **KiCad** (version 9.0+ recommended)
 - Schematics include:
   - Power supply & battery monitor
   - Sensor interfaces (BME280, MFRC522, Wind Speed Fan)
