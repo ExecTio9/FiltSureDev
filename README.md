@@ -148,7 +148,6 @@ Red	Offline / No communication
 - Dynamic LoRa Node ID assignment
 - Full OTA update pipeline via Gateway
 - Additional sensor support (VOC, PM2.5)
-- USB hardening for high-altitude balloon variant
 - Expand Google Sheets logging format
 
 # Internal Links
