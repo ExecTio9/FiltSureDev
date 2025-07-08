@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <SPI.h>
 #include <Adafruit_BME280.h>
@@ -11,46 +12,37 @@
 #include <esp_sleep.h>
 
 // ---------- Pin Definitions ----------
-#define BATTERY_PIN       0     // Battery Level Pin (ADC-in)
-#define DIAG_PIN          2     // Diagnostic Pin 
-#define WIND_PIN          3     // Wind Speed Pin (ADC-in)
-#define SCK               4     // SPI Serial Clock Pin
-#define MOSI              5     // SPI Master-Out-Slave-In Pin
-#define REGULATOR_EN_PIN  7     // 5V Regulator Pin
-#define RGB_BUILTIN       8     // Built-in RGB LED Pin
-#define MISO              15    // SPI Master-In-Slave-Out Pin
-#define BME_CS            23    // BME280 Chip Select Pin for SPI 
-#define RFID_CS           22    // RFID (MRFC522) Chip Select Pin for SPI 
-#define LORA_CS           21    // LoRa Chip Select Pin for SPI 
-#define LORA_RST          20    // LoRa Chip Reset Pin
-#define LORA_IRQ          18    // LoRa Chip Interrupt Request Pin
+#define BATTERY_PIN       0   // Battery Level Pin (ADC-in)
+#define DIAG_PIN          2   // Diagnostic Pin
+#define WIND_PIN          3   // Wind Speed Pin
+#define SCK               4   // SPI serial Clock Pin
+#define MOSI              5   // SPI Master-Out-Slave-In Pin
+#define REGULATOR_EN_PIN  7   // 5v Regulator Pin
+#define RGB_BUILTIN       8   // Built-in RGB LED Pin
+#define MISO              15  // SPI Master-In-Slave-Out Pin
+#define BME_CS            23  // BME Chip Select Pin
+#define RFID_CS           22  // RFID Chip Select Pin
+#define LORA_CS           21  // LoRa Chip Select Pin
+#define LORA_RST          20  // LoRa Chip Reset Pin
+#define LORA_IRQ          18  // LoRa Chip Interrupt Pin
+#define us_S              1000000ULL  // Clock Speed Reference
+#define sleep_Time        60  // Sleep Time
 
-#define RF95_FREQ 915.0         // RFID Frequency
-#define us_S 1000000ULL         // 
-#define sleep_Time 600          // Define sleep time
-#define LORA_NODE_ID "NODE_01"  // Manually assigned LoRa ID
-
-/*
-Initiation of functions/hardware
-
-bme() = Sets up I2C interface for BME280
-rfidPin() = 
-rfidDriver() = 
-mfrc522() = 
-radio() = 
-*/
+// ---------- Hardware Object Setup ----------
 Adafruit_BME280 bme(BME_CS);
 MFRC522DriverPinSimple rfidPin(RFID_CS);
 MFRC522DriverSPI rfidDriver(rfidPin);
 MFRC522 mfrc522(rfidDriver);
 RH_RF95 radio(LORA_CS, LORA_IRQ);
 
-RTC_DATA_ATTR int bootCount = 0;  // Counts the number of times the node starts up
+RTC_DATA_ATTR int bootCount = 0;  // DMA counter for booting held during sleep
+
+// ---------- Global State Variables ----------
 
 /*
 Node info & Data variable initiation
 
-ID = Device ID
+ID = Device ID hh.hh
 Web_App_Path = Specific spreadsheet ID for autoprocessing and upload to Google Sheets
 DataURL = Same as Web_App_Path
 Status_Read_Sensor = Boolean status for if the sensors were readable  
@@ -62,31 +54,32 @@ batteryVoltage
 batteryPercent
 windSpeed = Speed of wind in m/s
 */
-String ID = "01.19";
+
+String ID = "01.06";
 String Web_App_Path = "/macros/s/AKfycbzyinhl792ozO-Szi3PwUx6tGTd164YckAYTUUvRkZu2g-h25iGzGqcjx3fGKGF6NEs/exec";
 String DataURL = "", Status_Read_Sensor = "", rfid = "";
 float Temp, Humd, Prs;
 float batteryVoltage = 0.0, batteryPercent = 0.0, windSpeed = 0.0;
 
+bool isEncodedHost = false;
+bool tryEncodedHostFallback = true;
 volatile bool diagRequested = false;
 
-/*
-Function that grabs the battery percentage
-
-Parameters:
-voltage = Float value
-
-Work:
-voltage = Input value constrained to between 2.0 and 3.0 (=2.0 if < 2.0, =3.0 if > 3.0)
-
-Output: 
-Returns a percentage of the constrained input voltage's magnitude difference from the lower bound
-*/
+// ---------- Compute Battery Percentage from Voltage ----------
 float getBatteryPercentage(float voltage) {
   voltage = constrain(voltage, 2.0, 3.0);
   return (voltage - 2.0) * 100.0;
 }
 
+// ---------- Interrupt for Diagnostic Button ----------
+/*
+Function in the ESP32's RAM that turns the diagnostic button on
+*/
+void IRAM_ATTR onDiagButton() {
+  diagRequested = true;
+}
+
+// ---------- RGB Diagnostic LED Control ----------
 /*
 Function that flashes an RGB LED
 
@@ -112,32 +105,7 @@ void flashRGB(uint8_t r, uint8_t g, uint8_t b, int count = 1, int delayMs = 300)
   }
 }
 
-/*
-Function that attempts to connect to the wifi hotspot
-
-Work: 
-WiFi.mode(WIFI_STA) = Sets the WiFi to station mode (the ESP32 connects to an access point)
-WiFi.setSleep(false) = Takes the ESP32 out of the WiFi power save sleep mode
-WiFi.begin(arg1,arg2) = Starts attempting to connect to a network
-- arg1 = network SSID
-- arg2 = network password
-while() = While the WiFi is not connected and the millis passed subtracted by the start time is less than 800, delay by 0.5 seconds
-*/
-void connectToHotspot() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin("ESP32_HOTSPOT", "FiltSure_Rules");
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) delay(500);
-}
-
-/*
-Function in the ESP32's RAM that turns the diagnostic button on
-*/
-void IRAM_ATTR onDiagButton() {
-  diagRequested = true;
-}
-
+// ---------- Visual Diagnostic Output ----------
 /*
 Function that runs diagnostic checks of various systems and flashes LED error codes
 
@@ -170,7 +138,7 @@ True                 | True                   | Green
 - Set diagRequested to false
 */
 void runDiagnostics(bool bmeOK, bool rfidOK, float battPct, bool wifiOK, bool loraOK) {
-  flashRGB(255, 255, 255, 2, 150);
+  flashRGB(255, 255, 255, 2, 150); // Entry flash
   if (bmeOK && rfidOK) flashRGB(0, 255, 0);
   else if (bmeOK) flashRGB(255, 255, 0);
   else if (rfidOK) flashRGB(0, 0, 255);
@@ -184,9 +152,11 @@ void runDiagnostics(bool bmeOK, bool rfidOK, float battPct, bool wifiOK, bool lo
   else if (wifiOK) flashRGB(255, 255, 0);
   else if (loraOK) flashRGB(0, 0, 255);
   else flashRGB(255, 0, 0);
+
   diagRequested = false;
 }
 
+// ---------- Trigger Diagnostic Mode via USB or Button ----------
 /*
 Function called to enter/check the diagnostics mode
 
@@ -215,22 +185,25 @@ void checkDiagnosticsMode(bool bmeOK, bool rfidOK, float battPct, bool wifiOK, b
   }
 }
 
+// ---------- Compute Battery Percentage from Voltage ----------
 /*
-Function to setsup 
+Function that grabs the battery percentage
 
-Work: 
-- Initializes the regulator enable pin as an output GPIO pin
-- Writes the regulatory enable pin high 
-- Initializes the GPIO hold disable pin
-- Initializes the GPIO hold enable pin
+Parameters:
+voltage = Float value
+
+Work:
+voltage = Input value constrained to between 2.0 and 3.0 (=2.0 if < 2.0, =3.0 if > 3.0)
+
+Output: 
+Returns a percentage of the constrained input voltage's magnitude difference from the lower bound
 */
-void prepareRegulatorPin() {
-  pinMode(REGULATOR_EN_PIN, OUTPUT);
-  digitalWrite(REGULATOR_EN_PIN, HIGH);
-  gpio_hold_dis((gpio_num_t)REGULATOR_EN_PIN);
-  gpio_hold_en((gpio_num_t)REGULATOR_EN_PIN);
+float getBatteryPercentage(float voltage) {
+  voltage = constrain(voltage, 2.0, 3.0);
+  return (voltage - 2.0) * 100.0;
 }
 
+// ---------- Encode URL Parameters ----------
 /*
 Function to encode a string as a url
 
@@ -260,6 +233,7 @@ String urlEncode(const String& s) {
   return encoded;
 }
 
+// ---------- Build Upload URL Depending on Target ----------
 /*
 Function to build the website URL
 
@@ -269,21 +243,35 @@ diagnosticMode = Boolean that tells if diagnostic mode is enabled (defaults to f
 Work: 
 
 */
-void buildURL(bool diagnosticMode = false) {
-  DataURL = Web_App_Path;
-  DataURL += diagRequested ? "?sts=diag" : "?sts=write";
-  DataURL += "&id=" + ID;
-  DataURL += "&bc=" + String(bootCount);
-  DataURL += "&bat=" + String(batteryPercent, 2);
-  DataURL += "&srs=" + Status_Read_Sensor;
-  DataURL += "&temp=" + String(Temp);
-  DataURL += "&humd=" + String(Humd);
-  DataURL += "&Prs=" + String(Prs);
-  DataURL += "&wind=" + String(windSpeed, 2);
-  DataURL += "&rfid=" + rfid;
-  DataURL += "&lnid=" + String(LORA_NODE_ID);  // LoRa Node ID
+void buildURL() {
+  if (isEncodedHost) {
+    String encodedParams = "?sts=write";
+    encodedParams += "&id=" + ID;
+    encodedParams += "&bc=" + String(bootCount);
+    encodedParams += "&bat=" + String(batteryPercent, 2);
+    encodedParams += "&srs=" + Status_Read_Sensor;
+    encodedParams += "&temp=" + String(Temp);
+    encodedParams += "&humd=" + String(Humd);
+    encodedParams += "&Prs=" + String(Prs);
+    encodedParams += "&wind=" + String(windSpeed, 2);
+    encodedParams += "&rfid=" + rfid;
+    DataURL = "http://192.168.4.1/data?url=" + urlEncode(Web_App_Path + encodedParams);
+  } else {
+    DataURL = "https://script.google.com" + Web_App_Path;
+    DataURL += "?sts=write";
+    DataURL += "&id=" + ID;
+    DataURL += "&bc=" + String(bootCount);
+    DataURL += "&bat=" + String(batteryPercent, 2);
+    DataURL += "&srs=" + Status_Read_Sensor;
+    DataURL += "&temp=" + String(Temp);
+    DataURL += "&humd=" + String(Humd);
+    DataURL += "&Prs=" + String(Prs);
+    DataURL += "&wind=" + String(windSpeed, 2);
+    DataURL += "&rfid=" + rfid;
+  }
 }
 
+// ---------- Sensor Data Acquisition ----------
 /*
 Function to read the sensor data
 
@@ -323,6 +311,7 @@ void readSensors() {
   digitalWrite(RFID_CS, HIGH);
 }
 
+// ---------- Attempt Upload via HTTP ----------
 /*
 Function to send 
 
@@ -333,36 +322,32 @@ Work:
   http.GET();                                                       #Pulls the Server Name, Server Port, URLPath, HTTP Method, and User Agent
   http.end();                                                       #Ends connection
 */
-void HTTP_send() {
+bool HTTP_send() {
   HTTPClient http;
-  String url = "http://192.168.4.1/data?url=" + urlEncode(DataURL);
-  http.begin(url);
-  http.GET();
+  http.begin(DataURL);
+  int httpCode = http.GET();
   http.end();
+  return (httpCode > 0 && httpCode == HTTP_CODE_OK);
 }
 
+// ---------- LoRa Transmission with ACK ----------
 /*
 LoRa_sendAndVerify() function that sends a message over LoRa, then verifies that the message was received
 
 Work: 
-  digitalWrite(LORA_RST, LOW);                #Initiates reset of LoRa device
-  delay(10); 
+  digitalWrite(LORA_RST, LOW);                #Initiates reset of LoRa device 
   digitalWrite(LORA_RST, HIGH);               #Ends reset of LoRa device
-  delay(10);
   if (!radio.init()) {
     Serial.println("❌ LoRa init failed");
     return false;                             #If the LoRa device failts to initiate, the function returns false
   }
-
   radio.setFrequency(RF95_FREQ);                              #Sets 'radio' frequency to previously specified value
   radio.setTxPower(20, false);                                #Sets transmission power to 20 (false means we have a boost)
   radio.send((uint8_t *)DataURL.c_str(), DataURL.length());   #Sends 'DataURL' as a string
   radio.waitPacketSent();                                     #^Blocks until the transmitter is no longer transmitting.
-
   // Wait for ACK
   uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
   uint8_t len = sizeof(buf);                #Defines 'len' as max buffer size for RH_RF95
-
   if (radio.waitAvailableTimeout(1000)) {         #Starts the receiver and blocks for a 1s
     if (radio.recv(buf, &len)) {                  #Turns the receiver on if it not already 
       Serial.print("✅ ACK received: ");           on. If there is a valid message available, 
@@ -376,200 +361,98 @@ Work:
     Serial.println("⚠️ No ACK received");
     return false;
   }
-
 Output:
 - Returns either true or false
 */
 bool LoRa_sendAndVerify() {
-  digitalWrite(LORA_RST, LOW);
-  delay(10);
-  digitalWrite(LORA_RST, HIGH);
-  delay(10);
-  if (!radio.init()) {
-    Serial.println("❌ LoRa init failed");
-    return false;
-  }
-
-  radio.setFrequency(RF95_FREQ);
+  digitalWrite(LORA_RST, LOW); delay(10);
+  digitalWrite(LORA_RST, HIGH); delay(10);
+  if (!radio.init()) return false;
+  radio.setFrequency(915.0);
   radio.setTxPower(20, false);
-  radio.send((uirnt8_t *)DataURL.c_st(), DataURL.length());
-  radio.waitPacketSent();
-
-  // Wait for ACK
-  uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
-  uint8_t len = sizeof(buf);
-
-  if (radio.waitAvailableTimeout(1000)) {
-    if (radio.recv(buf, &len)) {
-      Serial.print("✅ ACK received: ");
-      Serial.println((char*)buf);
-      return true;
-    } else {
-      Serial.println("⚠️ ACK receive failed");
-      return false;
-    }
-  } else {
-    Serial.println("⚠️ No ACK received");
-    return false;
-  }
-}
-
-/*
-LoRa_pingAndWaitForPong() function
-
-Work: 
-  if (!radio.init()) {
-    Serial.println("❌ LoRa init failed");
-    return false;                                             #If the LoRa device failts to initiate, the function returns false
-  }
-
-  radio.setFrequency(RF95_FREQ);                              #Sets 'radio' frequency to previously specified value
-  radio.setTxPower(20, false);                                #Sets transmission power to 20 (false means we have a boost)
-  radio.send((uint8_t *)"ping", 4);                           #Sends 'DataURL' as a string
-  radio.waitPacketSent();                                     #^Blocks until the transmitter is no longer transmitting.
-
-  uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
-  uint8_t len = sizeof(buf);                                  #Defines 'len' as max buffer size for RH_RF95
-
-  if (radio.waitAvailableTimeout(1000)) {                     #Starts the receiver and blocks for a 1s
-    if (radio.recv(buf, &len)) {                              #Turns the receiver on if it not already on. If there is a valid 
-  //                                                           message available, copy it to buf and return true else return false.
-      String reply = String((char*)buf).substring(0, len);    #Intakes the bufferred message, setting it to the 'reply' variable
-      if (reply == "pong") {                                  #^Checks if this string is "pong"
-        Serial.println("✅ Pong received from LoRa");
-        return true;
-      }
-    }
-  }
-
-  Serial.println("⚠️ Pong not received");
-  return false;                                               #^If the string is not "pong", it returns false
-
-Output: 
-- Returns either true or false
-*/
-bool LoRa_pingAndWaitForPong() {
-  if (!radio.init()) {
-    Serial.println("❌ LoRa init failed");
-    return false;
-  }
-
-  radio.setFrequency(RF95_FREQ);
-  radio.setTxPower(20, false);
-  radio.send((uint8_t *)"ping", 4);
+  radio.send((uint8_t *)DataURL.c_str(), DataURL.length());
   radio.waitPacketSent();
 
   uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
   uint8_t len = sizeof(buf);
-
   if (radio.waitAvailableTimeout(1000)) {
-    if (radio.recv(buf, &len)) {
-      String reply = String((char*)buf).substring(0, len);
-      if (reply == "pong") {
-        Serial.println("✅ Pong received from LoRa");
-        return true;
-      }
-    }
+    if (radio.recv(buf, &len)) return true;
   }
-
-  Serial.println("⚠️ Pong not received");
   return false;
 }
 
+// ---------- Hold Regulator On During Deep Sleep ----------
+void prepareRegulatorPin() {
+  pinMode(REGULATOR_EN_PIN, OUTPUT);
+  digitalWrite(REGULATOR_EN_PIN, HIGH);
+  gpio_hold_dis((gpio_num_t)REGULATOR_EN_PIN);
+  gpio_hold_en((gpio_num_t)REGULATOR_EN_PIN);
+}
+
+// ---------- Main Entry ----------
 void setup() {
-  // ---------- Serial + Boot Count ----------
   Serial.begin(115200);
   delay(200);
   ++bootCount;
   Serial.printf("🔄 Boot #%d\n", bootCount);
-
   // ---------- GPIO Setup ----------
   pinMode(BME_CS, OUTPUT);    digitalWrite(BME_CS, HIGH);
   pinMode(RFID_CS, OUTPUT);   digitalWrite(RFID_CS, HIGH);
-  pinMode(LORA_CS, OUTPUT);   digitalWrite(LORA_CS, HIGH);
-  pinMode(LORA_RST, OUTPUT);  digitalWrite(LORA_RST, HIGH);
-  pinMode(DIAG_PIN, INPUT_PULLUP); // GPIO2 = External diagnostics trigger
+  pinMode(DIAG_PIN, INPUT_PULLUP);
   pinMode(REGULATOR_EN_PIN, OUTPUT); digitalWrite(REGULATOR_EN_PIN, HIGH);
-
+  pinMode(LORA_RST, OUTPUT);  digitalWrite(LORA_RST, HIGH);
   // ---------- Retain Regulator During Sleep ----------
   gpio_hold_dis((gpio_num_t)REGULATOR_EN_PIN);
   gpio_hold_en((gpio_num_t)REGULATOR_EN_PIN);
-
   // ---------- SPI Init ----------
   SPI.begin(SCK, MISO, MOSI);
-
   // ---------- Sensor Init ----------
   if (!bme.begin()) Serial.println("❌ BME280 init failed");
   else              Serial.println("✅ BME280 ready");
-
   mfrc522.PCD_Init();
   Serial.println("✅ MFRC522 ready");
-
-  // ---------- LoRa Init ----------
-  Serial.println("🔁 Resetting LoRa module...");
-  digitalWrite(LORA_RST, LOW); delay(10);
-  digitalWrite(LORA_RST, HIGH); delay(100);
-
-  digitalWrite(BME_CS, HIGH);   // Prevent SPI contention
-  digitalWrite(RFID_CS, HIGH);
-
-  bool loraOK = false;
-  if (radio.init()) {
-    radio.setFrequency(RF95_FREQ);
-    radio.setTxPower(20, false);
-    Serial.println("✅ LoRa radio initialized.");
-    loraOK = true;
+  // ---------- WiFi Moderation ----------
+  WiFiManager wm;
+  bool wifiOK = wm.autoConnect("FiltSure_Setup");
+  if (wifiOK) {
+    Serial.println("✅ Connected to WiFi");
+    String ssid = WiFi.SSID();
+    isEncodedHost = ssid.startsWith("ESP32_HOST") || ssid.startsWith("FiltSure");
   } else {
-    Serial.println("❌ LoRa radio init failed.");
+    Serial.println("❌ Failed to connect to WiFi");
   }
-
-  // ---------- WiFi Init ----------
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin("ESP32_HOTSPOT", "FiltSure_Rules");
-
-  bool wifiOK = false;
-  unsigned long wifiStart = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 8000) {
-    delay(500);
-    Serial.print(".");
-  }
-  wifiOK = (WiFi.status() == WL_CONNECTED);
-  Serial.println(wifiOK ? "\n✅ WiFi connected" : "\n❌ WiFi failed");
-
   // ---------- Read Sensors ----------
   batteryVoltage = analogRead(BATTERY_PIN) * (5.0 / 4095.0) * 2.0;
   batteryPercent = getBatteryPercentage(batteryVoltage);
   windSpeed = analogRead(WIND_PIN) * (5.0 / 4095.0);
   readSensors();
-
-  bool isDiagnostic = diagRequested || usb_serial_jtag_is_connected() || digitalRead(DIAG_PIN) == LOW;
-  buildURL(isDiagnostic);
-  Serial.println("📛 LoRa Node ID: " + String(LORA_NODE_ID));
-
-  if (diagRequested) {
-    Status_Read_Sensor = "diag";
-    loraOK = LoRa_pingAndWaitForPong();  // try to verify LoRa
-    diagRequested = false;  // <- RESET FLAG IMMEDIATELY AFTER USE
-  }
-
+  buildURL();
   // ---------- Diagnostics Check ----------
   bool bmeOK = !isnan(Temp);
   bool rfidOK = !rfid.isEmpty();
+  bool loraOK = radio.init();
   checkDiagnosticsMode(bmeOK, rfidOK, batteryPercent, wifiOK, loraOK);
-
-  // ---------- Data Upload ----------
+  // ---------- Upload Logic ----------
+  bool uploadSuccess = false;
   if (wifiOK) {
-    HTTP_send();
-  } else if (loraOK) {
-    LoRa_sendAndVerify();  // fallback
+    if (HTTP_send()) {
+      Serial.println("✅ Data uploaded successfully");
+      uploadSuccess = true;
+    } else if (tryEncodedHostFallback) {
+      Serial.println("⚠️ Upload to Sheets failed, trying encoded host fallback");
+      isEncodedHost = true;
+      buildURL();
+      uploadSuccess = HTTP_send();
+    }
   }
-
   // ---------- Wake Sources ----------
-  esp_sleep_enable_ext1_wakeup(1ULL << DIAG_PIN, ESP_EXT1_WAKEUP_ALL_LOW);  // External button
-  esp_sleep_enable_timer_wakeup(sleep_Time * us_S);                         // Timer wake
-
-  // ---------- Sleep ----------
+  if (!uploadSuccess) {
+    Serial.println("📡 Trying LoRa fallback...");
+    uploadSuccess = LoRa_sendAndVerify();
+    Serial.println(uploadSuccess ? "✅ LoRa upload success" : "❌ LoRa upload failed");
+  }
+ // ---------- Sleep ----------
+  esp_sleep_enable_timer_wakeup(sleep_Time * us_S);
   prepareRegulatorPin();
   Serial.println("💤 Going to deep sleep...");
   Serial.flush();
